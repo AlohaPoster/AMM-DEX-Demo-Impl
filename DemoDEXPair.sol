@@ -2,6 +2,8 @@ pragma solidity =0.5.16;
 
 import './interface/IERC20.sol';
 import './libraries/SafeMath.sol';
+import './DemoPriorityQueue.sol';
+import './DemoDEXOrder.sol';
 
 contract DemoDEXPair is IERC20 {
     using SafeMath  for uint;
@@ -71,8 +73,8 @@ contract DemoDEXPair is IERC20 {
     address public factory;
     address public token0;
     address public token1;
-    uint112 private numToken0;          
-    uint112 private numToken1; 
+    uint112 public numToken0;
+    uint112 public numToken1; 
     IERC20 public IERC20Token0;
     IERC20 public IERC20Token1;          
 
@@ -111,7 +113,12 @@ contract DemoDEXPair is IERC20 {
             success = IERC20Token1.transferFrom(from, to, value);
         }
         require(success, 'Error : IERC20 TranserFrom Fault');
-   }
+    }
+
+    // =========================================== orderlist ===================================================
+    DemoDEXOrder public orderlist;
+    DemoPriorityQueue[2] soldOrders;
+    DemoPriorityQueue[2] buyOrders;
 
     function initialize(address _token0, address _token1) external {
         require(msg.sender == factory, 'Error : Pair Creator must be factory'); 
@@ -119,17 +126,24 @@ contract DemoDEXPair is IERC20 {
         token1 = _token1;
         IERC20Token0 = IERC20(token0);
         IERC20Token1 = IERC20(token1);
+        orderlist = new DemoDEXOrder();
+        for (uint i = 0; i < 2; i ++) {
+            soldOrders[i] = new DemoPriorityQueue(address(orderlist));
+            buyOrders[i] = new DemoPriorityQueue(address(orderlist));
+        }
     }
 
     function _updateWithBalance(uint balance0, uint balance1) private {
         require(balance0 <= uint112(-1) && balance1 <= uint112(-1), 'Error : OVERFLOW');
         numToken0 = uint112(balance0);
         numToken1 = uint112(balance1);
+        _checkUpdate();
     }
 
-    function _updateFromIERC20() private {
+    function updateFromIERC20() public {
         numToken0 = uint112(IERC20Token0.balanceOf(address(this)));
         numToken1 = uint112(IERC20Token1.balanceOf(address(this)));
+        _checkUpdate();
     }
 
     // 为LP提供流动性代币(已经讲Token转入自己账户)
@@ -152,7 +166,6 @@ contract DemoDEXPair is IERC20 {
         emit Mint(msg.sender, amount0, amount1);
     }
 
-   
     function comuteAmountsAndBurn(address to) internal ReentrantAttack returns (uint amount0, uint amount1) {
         uint balance0 = IERC20Token0.balanceOf(address(this));
         uint balance1 = IERC20Token1.balanceOf(address(this));
@@ -238,9 +251,9 @@ contract DemoDEXPair is IERC20 {
         (uint amount0Out, uint amount1Out) = (whichToSold < whichToBuy) ? (numToSlod, numToBuy) : (numToBuy, numToSlod);
         _transferTokensForSwap(amount0Out, amount1Out, _to);
     }
-
+ 
     // vSwap ，虚拟交换，可用于查看价格，不真正进行代币交换，调用交易无需附带TokenA 
-    function vSwapWithFixedSold(uint A0, uint desiredB0Min, address tokenA) external view returns(uint realB0, bool ok){
+    function vSwapWithFixedSold(uint A0, uint desiredB0Min, address tokenA) public view returns(uint realB0, bool ok){
         uint whichA = _whichIsTokenA(tokenA);
         if (whichA == 0) {
             realB0 = _getPriceWithFixedSold(A0, numToken0, numToken1);
@@ -250,7 +263,7 @@ contract DemoDEXPair is IERC20 {
         ok = (realB0 >= desiredB0Min) ? true : false;
     }
 
-    function vSwapWithFixedBuy(uint B0, uint desiredA0Max, address tokenA) external view returns(uint realA0, bool ok) {
+    function vSwapWithFixedBuy(uint B0, uint desiredA0Max, address tokenA) public view returns(uint realA0, bool ok) {
         uint whichA = _whichIsTokenA(tokenA);
         if (whichA == 0) {
             realA0 = _getPriceWithFixedBuy(B0, numToken0, numToken1);
@@ -261,39 +274,99 @@ contract DemoDEXPair is IERC20 {
     }
 
     // 价格合适将直接进行Token swap
-    function swapWithFixedSold(uint A0,uint desiredB0Min,address tokenA,uint deadline) external ensure(deadline) returns (bool) {
-        uint whichA = _whichIsTokenA(tokenA);
+    function swapWithFixedSold(uint A0, uint desiredB0Min, address tokenA, uint deadline, address from) public ensure(deadline) returns (bool ok) {
         uint realB0;
-        if (whichA == 0) {
-            realB0 = _getPriceWithFixedSold(A0, numToken0, numToken1);
-        } else {
-            realB0 = _getPriceWithFixedSold(A0, numToken1, numToken0); 
-        }
-        address _tokenB = (whichA == 0) ? token1 : token0;
-        if(realB0 >= desiredB0Min){
-            _transferERC20(tokenA, msg.sender, address(this),A0);
-            _swap(0, realB0, tokenA, _tokenB, msg.sender);
-            return true;
+        (realB0, ok) = vSwapWithFixedSold(A0, desiredB0Min, tokenA);
+        address _tokenB = (_whichIsTokenA(tokenA) == 0) ? token1 : token0;
+        if (ok) {
+            _transferERC20(tokenA, from, address(this),A0);
+            _swap(0, realB0, tokenA, _tokenB, from);
         } 
-        return false;
+    }
+   
+    function swapWithFixedBuy(uint B0, uint desiredA0Max, address tokenA, uint deadline, address from) public ensure(deadline) returns (bool ok) {
+        uint realA0;
+        (realA0, ok) = vSwapWithFixedBuy(B0, desiredA0Max, tokenA);
+        address _tokenB = (_whichIsTokenA(tokenA) == 0) ? token1 : token0;
+        if (ok) {
+            _transferERC20(tokenA, from, address(this), realA0);
+            _swap(0, B0, tokenA, _tokenB, from);
+        }
     }
 
-   
-    function swapWithFixedBuy(uint B0,uint desiredA0Max,address tokenA,uint deadline) external ensure(deadline) returns (bool) {
-        uint whichA = _whichIsTokenA(tokenA);
-        uint realA0;
-        if (whichA == 0) {
-            realA0 = _getPriceWithFixedBuy(B0, numToken0, numToken1);
+    // 订单模式
+    // 希望用 A0 个 tokenA 换取最少 desiredB0Min 个 tokenB
+    function bookSold(uint A0, uint desiredB0Min, address tokenA, uint deadline) external ensure(deadline) returns (bool, uint256) {
+        bool ok = swapWithFixedSold(A0, desiredB0Min, tokenA, deadline, msg.sender); // 满足交易直接执行
+        if (ok) {
+            return (false, 0);
         } else {
-            realA0 = _getPriceWithFixedBuy(B0, numToken1, numToken0); 
+            uint256 id = orderlist.newOrder(true, deadline, tokenA, A0, desiredB0Min, msg.sender);
+            soldOrders[_whichIsTokenA(tokenA)].addOrder(id);
+            return (true, id);
         }
-        address _tokenB = (whichA == 0) ? token1 : token0;
-        if(realA0 <= desiredA0Max){
-            _transferERC20(tokenA, msg.sender, address(this), realA0);
-            _swap(0, B0, tokenA, _tokenB, msg.sender);
-            return true;
+    }
+
+    // 希望用最多 desiredA0Max 个 tokenA 换取 B0 个 tokenB
+    function bookBuy(uint B0, uint desiredA0Max, address tokenA, uint deadline) external ensure(deadline) returns (bool, uint256) {
+        bool ok = swapWithFixedBuy(B0, desiredA0Max, tokenA, deadline, msg.sender); // 满足交易直接执行
+        if (ok) {
+            return (false, 0);
+        } else {
+            uint256 id = orderlist.newOrder(false, deadline, tokenA, desiredA0Max, B0, msg.sender);
+            buyOrders[_whichIsTokenA(tokenA)].addOrder(id);
+            return (true, id);
         }
-        return false;      
+    }
+
+    // 获取订单
+    function _getOrderList(DemoPriorityQueue queue) private view returns (uint len, uint256[] memory idList) {
+        len = queue.getSize();
+        if (len > 0) {
+            uint cnt = 1;
+            idList = new uint256[](len);
+            idList[0] = queue.getFrontOrderId();
+            for (uint i = 0; cnt < len; i ++) {
+                uint256 left;
+                uint256 right;
+                (left, right) = queue.getNext(idList[i]);
+                if (left > 0) idList[cnt ++] = left;
+                if (right > 0) idList[cnt ++] = right;
+            }
+        }
+    }
+
+    // 获取固定数量 tokenA 换取 tokenB 的订单
+    function getSoldOrderList(address tokenA) external view returns (uint, uint256[] memory) {
+        return _getOrderList(soldOrders[_whichIsTokenA(tokenA)]);
+    }
+
+    // 获取 tokenA 换取固定数量 tokenB 的订单
+    function getBuyOrderList(address tokenA) external view returns (uint, uint256[] memory) {
+        return _getOrderList(buyOrders[_whichIsTokenA(tokenA)]);
+    }
+
+    function _tryOrder(bool isSold, uint256 id) internal returns (bool ok) {
+        if (isSold) {
+            ok = swapWithFixedSold(orderlist.getFromNum(id), orderlist.getToNum(id), orderlist.getFromToken(id), orderlist.getDeadline(id), orderlist.getTransfer(id));
+        } else {
+            ok = swapWithFixedBuy(orderlist.getToNum(id), orderlist.getFromNum(id), orderlist.getFromToken(id), orderlist.getDeadline(id), orderlist.getTransfer(id));
+        }
+    }
+
+    function _checkUpdate() private {
+        for (uint i = 0; i < 2; i ++) {
+            while (soldOrders[i].getSize() > 0 && orderlist.getDeadline(soldOrders[i].getMinDeadlineOrderId()) < block.timestamp)
+                orderlist.deleteOrder(soldOrders[i].popMinDeadlineOrderId());
+            while (buyOrders[i].getSize() > 0 && orderlist.getDeadline(buyOrders[i].getMinDeadlineOrderId()) < block.timestamp)
+                orderlist.deleteOrder(buyOrders[i].popMinDeadlineOrderId());
+        }
+        for (uint inTokenId = 0; inTokenId < 2; inTokenId ++) {
+            while (soldOrders[inTokenId].getSize() > 0 && _tryOrder(true, soldOrders[inTokenId].getFrontOrderId()))
+                orderlist.deleteOrder(soldOrders[inTokenId].popFrontOrderId());
+            while (buyOrders[inTokenId].getSize() > 0 && _tryOrder(false, buyOrders[inTokenId].getFrontOrderId()))
+                orderlist.deleteOrder(buyOrders[inTokenId].popFrontOrderId());
+        }
     }
 
     // ============================== Util Functions ====================================
@@ -351,5 +424,4 @@ contract DemoDEXPair is IERC20 {
     function _sortedTokenNum(address tokenA, address tokenB) internal view returns(uint numTokenA, uint numTokenB) {
         (numTokenA, numTokenB) = (tokenA < tokenB) ? (numToken0, numToken1) : (numToken1, numToken0);
     }
-
 }

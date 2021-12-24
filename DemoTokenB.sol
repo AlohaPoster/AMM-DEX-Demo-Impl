@@ -2,7 +2,7 @@
 pragma solidity =0.5.16;
 import './interface/IERC20.sol';
 
-contract TokenDemo is IERC20 {
+contract TokenDemoB is IERC20 {
 
     uint256 public totalSupply = 100000*10**18;
     string public constant name = "DemoDEXTestToken1";                  
